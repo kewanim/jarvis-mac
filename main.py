@@ -1,124 +1,201 @@
 import time
-import librosa
 import threading
 import sounddevice as sd
 from queue import Queue
-from playsound import playsound
-from melo.api import TTS
+from pydantic import BaseModel
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.align import Align
+from rich import box
+
 from stt.VoiceActivityDetection import VADDetector
 from mlx_lm import load, generate
-from pydantic import BaseModel
+from tts.jarvis_voice import JarvisVoice
 
-# Note keep this at the bottom to avoid errors. Or fix it and submit a PR
+# Keep Whisper import at bottom to avoid init errors (upstream note)
 from stt.whisper.transcribe import FastTranscriber
 
-master = "You are a helpful assistant designed to run offline with decent latency, you are open source. Answer the following input from the user in no more than three sentences. Address them as Sir at all times. Only respond with the dialogue, nothing else."
+console = Console()
+
+MASTER_PROMPT = (
+    "You are J.A.R.V.I.S. — Just A Rather Very Intelligent System. "
+    "You are a sophisticated AI assistant running offline on Apple Silicon. "
+    "Respond in no more than three sentences. "
+    "You are precise, calm, and slightly formal. Address the user as 'Sir' at all times. "
+    "Only respond with dialogue — no stage directions, no asterisks, no formatting."
+)
+
+BANNER = r"""
+     ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
+     ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
+     ██║███████║██████╔╝██║   ██║██║███████╗
+██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
+╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
+ ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
+
+        Just A Rather Very Intelligent System
+              Running Offline  ·  MLX
+"""
 
 
-class ChatMLMessage(BaseModel):
+class ChatMessage(BaseModel):
     role: str
     content: str
 
 
-class Client:
-    def __init__(self, startListening=True, history: list[ChatMLMessage] = []):
-        self.greet()
+class JarvisClient:
+    def __init__(self):
         self.listening = False
-        self.history = history
-        self.vad = VADDetector(lambda: None, self.onSpeechEnd, sensitivity=0.3)
-        self.vad_data = Queue()
-        self.tts = TTS(language="EN_NEWEST", device="mps")
-        self.stt = FastTranscriber("mlx-community/whisper-large-v3-mlx-4bit")
-        self.model, self.tokenizer = load(
-            "mlx-community/Meta-Llama-3-8B-Instruct-4bit"
-        )  # want lower ltency? use mlx-community/Phi-3-mini-4k-instruct-8bit
+        self.history: list[ChatMessage] = []
+        self.vad_data: Queue = Queue()
+        self._boot()
 
-        if startListening:
-            self.toggleListening()
-            self.startListening()
-            t = threading.Thread(target=self.transcription_loop)
-            t.start()
+    # ------------------------------------------------------------------ boot
 
-    def greet(self):
-        print()
-        print(
-            "\033[36mWelcome to JARVIS-MLX\n\nFollow @huwprosser_ on X for updates\033[0m"
+    def _boot(self):
+        console.clear()
+        console.print(
+            Panel(
+                Align.center(Text(BANNER, style="bright_cyan")),
+                border_style="bright_cyan",
+                box=box.DOUBLE,
+                padding=(0, 2),
+            )
         )
-        print()
+        console.print()
 
-    def startListening(self):
-        t = threading.Thread(target=self.vad.startListening)
-        t.start()
+        self._log_status("Loading speech recognition model...")
+        self.stt = FastTranscriber("mlx-community/whisper-large-v3-mlx-4bit")
 
-    def toggleListening(self):
-        if not self.listening:
-            print()
-            playsound("beep.mp3")
-            print("\033[36mListening...\033[0m")
+        self._log_status("Loading language model  (Llama 3 8B)...")
+        self.model, self.tokenizer = load("mlx-community/Meta-Llama-3-8B-Instruct-4bit")
 
-        while not self.vad_data.empty():
-            self.vad_data.get()
+        self._log_status("Loading JARVIS voice...")
+        self.tts = JarvisVoice()
 
-        self.listening = not self.listening
+        self._log_status("Calibrating microphone...")
+        self.vad = VADDetector(lambda: None, self._on_speech_end, sensitivity=0.3)
 
-    def onSpeechEnd(self, data):
+        console.print()
+        console.print(
+            Panel(
+                Align.center(
+                    Text("SYSTEM ONLINE — GOOD DAY, SIR.", style="bold bright_cyan")
+                ),
+                border_style="bright_cyan",
+                box=box.HEAVY,
+                padding=(1, 4),
+            )
+        )
+        console.print()
+        self.tts.speak("Good day, Sir. J.A.R.V.I.S. is online and ready.")
+
+    def _log_status(self, message: str):
+        console.print(f"  [dim cyan]›[/dim cyan]  [cyan]{message}[/cyan]")
+
+    # --------------------------------------------------------------- events
+
+    def _on_speech_end(self, data):
         if data.any():
             self.vad_data.put(data)
 
-    def addToHistory(self, content: str, role: str):
+    def _toggle_listening(self):
+        self.listening = not self.listening
+
+    # ------------------------------------------------------------ rendering
+
+    def _divider(self, label: str, style: str):
+        width = console.width or 80
+        pad = (width - len(label) - 6) // 2
+        line = "─" * pad
+        console.print(f"  [{style}]{line}  {label}  {line}[/{style}]")
+
+    def _print_exchange(self, content: str, role: str):
         if role == "user":
-            print(f"\033[32m{content}\033[0m")
+            console.print(
+                Panel(
+                    Text(content, style="bright_white"),
+                    title="[bright_white]  YOU  [/bright_white]",
+                    border_style="white",
+                    box=box.ROUNDED,
+                    padding=(0, 2),
+                )
+            )
         else:
-            print(f"\033[33m{content}\033[0m")
+            console.print(
+                Panel(
+                    Text(content, style="bright_cyan"),
+                    title="[bright_cyan]  J.A.R.V.I.S.  [/bright_cyan]",
+                    border_style="bright_cyan",
+                    box=box.ROUNDED,
+                    padding=(0, 2),
+                )
+            )
+        console.print()
 
-        if role == "user":
-            content = f"""{master}\n\n{content}"""
-        self.history.append(ChatMLMessage(content=content, role=role))
+    # ------------------------------------------------------------ history
 
-    def getHistoryAsString(self):
-        final_str = ""
-        for message in self.history:
-            final_str += f"<|{message.role}|>{message.content}<|end|>\n"
+    def _add_to_history(self, content: str, role: str):
+        self._print_exchange(content, role)
+        prompt_content = f"{MASTER_PROMPT}\n\n{content}" if role == "user" else content
+        self.history.append(ChatMessage(content=prompt_content, role=role))
 
-        return final_str
+    def _build_prompt(self) -> str:
+        result = ""
+        for msg in self.history:
+            result += f"<|{msg.role}|>{msg.content}<|end|>\n"
+        return result
 
-    def transcription_loop(self):
+    # ------------------------------------------------------------ main loop
+
+    def start(self):
+        t_vad = threading.Thread(target=self.vad.startListening, daemon=True)
+        t_vad.start()
+        self._toggle_listening()
+        self._divider("LISTENING", "bright_cyan")
+
         while True:
             if not self.vad_data.empty():
                 data = self.vad_data.get()
-                if self.listening and len(data) > 12000:
-                    self.toggleListening()
-                    transcribed = self.stt.transcribe(data, language="en")
-                    self.addToHistory(transcribed["text"], "user")
 
-                    history = self.getHistoryAsString()
+                if self.listening and len(data) > 12000:
+                    self._toggle_listening()
+                    self._divider("PROCESSING SPEECH", "yellow")
+
+                    transcribed = self.stt.transcribe(data, language="en")
+                    user_text = transcribed["text"].strip()
+
+                    if not user_text:
+                        self._toggle_listening()
+                        self._divider("LISTENING", "bright_cyan")
+                        continue
+
+                    self._add_to_history(user_text, "user")
+                    self._divider("THINKING", "yellow")
+
                     response = generate(
                         self.model,
                         self.tokenizer,
-                        prompt=history + "\n<|assistant|>",
+                        prompt=self._build_prompt() + "\n<|assistant|>",
                         verbose=False,
+                        max_tokens=150,
                     )
                     response = (
-                        response.split("<|assistant|>")[0].split("<|end|>")[0].strip()
+                        response.split("<|assistant|>")[0]
+                        .split("<|end|>")[0]
+                        .strip()
                     )
-                    self.addToHistory(response, "assistant")
 
-                    self.speak(response)
+                    self._add_to_history(response, "assistant")
+                    self._divider("SPEAKING", "bright_green")
+                    self.tts.speak(response)
 
-    def speak(self, text):
-        data = self.tts.tts_to_file(
-            text,
-            self.tts.hps.data.spk2id["EN-Newest"],
-            speed=0.95,
-            quiet=True,
-            sdp_ratio=0.5,
-        )
-        trimmed_audio, _ = librosa.effects.trim(data, top_db=20)
-        sd.play(trimmed_audio, 44100, blocking=True)
-        time.sleep(1)
+                    self._toggle_listening()
+                    self._divider("LISTENING", "bright_cyan")
 
-        self.toggleListening()
+            time.sleep(0.05)
 
 
 if __name__ == "__main__":
-    jc = Client(startListening=True, history=[])
+    JarvisClient().start()
