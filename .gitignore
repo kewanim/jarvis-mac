@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Conda
+.conda/
+
+# Models (too large for git)
+models/
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Audio temp files
+*.wav
+*.mp3
+temp_audio/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.*
+secrets.json
